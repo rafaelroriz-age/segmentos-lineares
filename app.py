@@ -46,7 +46,7 @@ from pipeline.audit import (
     feature_importance_xgb, diagnostico_metodo,
     auditoria_completa,
 )
-from pipeline.export_excel import exportar_excel
+from pipeline.export_excel import exportar_excel, exportar_excel_metodo
 
 # ── Configuração da página ────────────────────────────────────────────────────
 
@@ -580,26 +580,28 @@ with tab_pipeline:
         )
 
         st.divider()
-        st.markdown("**CSVs individuais por método:**")
+        st.markdown("**📊 Relatórios Excel individuais por método:**")
         for nome, (seg_f, tbl) in all_downloads.items():
             safe = nome.replace(' ', '_').replace('.', '').replace('+', '_')
-            c1, c2 = st.columns(2)
-            with c1:
-                st.download_button(
-                    f"Segmentos — {nome}",
-                    data=seg_f.to_csv(index=False).encode('utf-8'),
-                    file_name=f"segmentos_{safe}.csv",
-                    mime="text/csv",
-                    key=f"dl_seg_{safe}",
-                )
-            with c2:
-                st.download_button(
-                    f"Resumo — {nome}",
-                    data=tbl.to_csv(index=False).encode('utf-8'),
-                    file_name=f"resumo_{safe}.csv",
-                    mime="text/csv",
-                    key=f"dl_tbl_{safe}",
-                )
+            xlsx_ind = exportar_excel_metodo(
+                nome=nome,
+                seg120=seg120,
+                seg_final=seg_f,
+                tbl=tbl,
+                resultados=resultados,
+                vars_ok=vars_ok,
+                METODO_COL=METODO_COL,
+                df_comp=df_comp,
+                parametros=parametros_info,
+            )
+            st.download_button(
+                f"📥 Excel — {nome}",
+                data=xlsx_ind,
+                file_name=f"relatorio_{safe}_{ts}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"dl_xlsx_{safe}",
+                use_container_width=True,
+            )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ABA RELATÓRIO

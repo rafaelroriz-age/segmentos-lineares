@@ -766,3 +766,531 @@ def exportar_excel(
     wb.save(buf)
     buf.seek(0)
     return buf.getvalue()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXPORTAÇÃO INDIVIDUAL POR MÉTODO — Excel completo standalone
+# ══════════════════════════════════════════════════════════════════════════════
+
+def exportar_excel_metodo(
+    nome,
+    seg120,
+    seg_final,
+    tbl,
+    resultados,
+    vars_ok,
+    METODO_COL,
+    df_comp=None,
+    parametros=None,
+):
+    """
+    Gera Excel completo para UM único método, com:
+
+    1. Resumo           — parâmetros, info do método, estatísticas
+    2. Segmentos Finais — tabela resumo + gráficos (deflexão, comprimento)
+    3. Perfil           — perfil longitudinal com gráfico
+    4. Dados 120m       — dados completos a cada 120m
+    5. Estatísticas     — descritivas por segmento + histograma
+    6. Métricas         — avaliação intrínseca/extrínseca deste método
+
+    Retorna bytes do .xlsx
+    """
+    wb = Workbook()
+
+    col_cluster = METODO_COL.get(nome, 'cluster_kmeans')
+    col_final = f'{col_cluster}_espacial'
+    tipo = ('Tradicional' if nome in ['CDA', 'MCV', 'SHS']
+            else 'Change-Point' if nome == 'PELT'
+            else 'ML Supervisionado' if nome in ['KNN', 'Random Forest']
+            else 'Clustering + Linearização')
+
+    # ══════════════════════════════════════════════════════════════════
+    # ABA 1 — RESUMO DO MÉTODO
+    # ══════════════════════════════════════════════════════════════════
+    ws = wb.active
+    ws.title = 'Resumo'
+    ws.sheet_properties.tabColor = '1F4E79'
+
+    row = _add_title(ws, f'🛣️ Segmentação — {nome}', merge_cols=8)
+    row = _add_subtitle(ws, 'Relatório individual do método', row)
+
+    info = {
+        'Data de geração': datetime.now().strftime('%d/%m/%Y %H:%M'),
+        'Método': nome,
+        'Tipo': tipo,
+        'Total de segmentos (120m)': len(seg120),
+        'Segmentos finais': len(tbl),
+        'Extensão total (m)': f"{seg120['km_fim'].max() - seg120['km_ini'].min():.0f}" if len(seg120) > 0 else 'N/A',
+        'Deflexão média geral': f"{seg120['Deflexao'].mean():.2f}" if 'Deflexao' in seg120.columns else 'N/A',
+        'Deflexão caract. média': f"{seg120['Deflexao_caract'].mean():.2f}" if 'Deflexao_caract' in seg120.columns else 'N/A',
+        'Features usadas': ', '.join(vars_ok),
+    }
+    if parametros:
+        info.update(parametros)
+
+    for key, val in info.items():
+        ws.cell(row=row, column=1, value=key).font = Font(bold=True, name='Calibri', size=10)
+        ws.cell(row=row, column=1).border = BORDER_THIN
+        ws.cell(row=row, column=2, value=str(val)).font = FONT_BODY
+        ws.cell(row=row, column=2).border = BORDER_THIN
+        ws.cell(row=row, column=2).alignment = ALIGN_LEFT
+        row += 1
+
+    ws.column_dimensions['A'].width = 28
+    ws.column_dimensions['B'].width = 50
+
+    # Métricas intrínsecas neste resumo
+    res = resultados.get(nome)
+    if res:
+        from pipeline.evaluation import avaliar_intrinseco, avaliar_extrinseco_xgb
+        metricas = avaliar_intrinseco(res['X_scaled'], res['labels'])
+        if metricas:
+            row += 1
+            row = _add_subtitle(ws, 'Métricas de Qualidade', row)
+            for k, v in metricas.items():
+                ws.cell(row=row, column=1, value=k).font = Font(bold=True, name='Calibri', size=10)
+                ws.cell(row=row, column=1).border = BORDER_THIN
+                val_str = f"{v:.4f}" if isinstance(v, float) else str(v)
+                ws.cell(row=row, column=2, value=val_str).font = FONT_BODY
+                ws.cell(row=row, column=2).border = BORDER_THIN
+                row += 1
+
+            extr = avaliar_extrinseco_xgb(res['X_scaled'], res['labels'])
+            if extr.get('xgb_accuracy_cv'):
+                ws.cell(row=row, column=1, value='XGB Accuracy (CV)').font = Font(bold=True, name='Calibri', size=10)
+                ws.cell(row=row, column=1).border = BORDER_THIN
+                ws.cell(row=row, column=2, value=f"{extr['xgb_accuracy_cv']:.4f}").font = FONT_BODY
+                ws.cell(row=row, column=2).border = BORDER_THIN
+                row += 1
+
+    # ══════════════════════════════════════════════════════════════════
+    # ABA 2 — SEGMENTOS FINAIS (tabela + gráficos)
+    # ══════════════════════════════════════════════════════════════════
+    ws_seg = wb.create_sheet('Segmentos Finais')
+    ws_seg.sheet_properties.tabColor = '2E75B6'
+
+    row = _add_title(ws_seg, f'Segmentos Finais — {nome}', merge_cols=10)
+
+    # Info rápida
+    ws_seg.cell(row=row, column=1, value='Tipo:').font = Font(bold=True, name='Calibri')
+    ws_seg.cell(row=row, column=2, value=tipo).font = FONT_BODY
+    row += 1
+    ws_seg.cell(row=row, column=1, value='Segmentos:').font = Font(bold=True, name='Calibri')
+    ws_seg.cell(row=row, column=2, value=len(tbl)).font = FONT_BODY
+    row += 1
+    if 'Comprimento_m' in tbl.columns:
+        ws_seg.cell(row=row, column=1, value='Extensão total (m):').font = Font(bold=True, name='Calibri')
+        ws_seg.cell(row=row, column=2, value=f"{tbl['Comprimento_m'].sum():.0f}").font = FONT_BODY
+        row += 1
+    if 'Deflexao_med' in tbl.columns:
+        ws_seg.cell(row=row, column=1, value='Deflexão média (segmentos):').font = Font(bold=True, name='Calibri')
+        ws_seg.cell(row=row, column=2, value=f"{tbl['Deflexao_med'].mean():.2f}").font = FONT_BODY
+        row += 1
+    row += 1
+
+    # Tabela resumo
+    row = _add_subtitle(ws_seg, 'Resumo dos Segmentos', row)
+    tbl_start = row
+    row = _write_df(ws_seg, tbl.round(2), start_row=row)
+    tbl_end = row - 1
+
+    # Formatação condicional na deflexão
+    if 'Deflexao_med' in tbl.columns:
+        defl_idx = list(tbl.columns).index('Deflexao_med') + 1
+        defl_letter = get_column_letter(defl_idx)
+        ws_seg.conditional_formatting.add(
+            f'{defl_letter}{tbl_start + 1}:{defl_letter}{tbl_end}',
+            ColorScaleRule(
+                start_type='min', start_color='C6EFCE',
+                mid_type='percentile', mid_value=50, mid_color='FFEB9C',
+                end_type='max', end_color='FFC7CE'
+            )
+        )
+
+    # Formatação condicional no comprimento
+    if 'Comprimento_m' in tbl.columns:
+        comp_idx_c = list(tbl.columns).index('Comprimento_m') + 1
+        comp_letter = get_column_letter(comp_idx_c)
+        ws_seg.conditional_formatting.add(
+            f'{comp_letter}{tbl_start + 1}:{comp_letter}{tbl_end}',
+            ColorScaleRule(
+                start_type='min', start_color='FFC7CE',
+                mid_type='percentile', mid_value=50, mid_color='FFEB9C',
+                end_type='max', end_color='C6EFCE'
+            )
+        )
+
+    # Gráfico — Deflexão média por segmento
+    if 'Deflexao_med' in tbl.columns and len(tbl) > 0:
+        chart1 = BarChart()
+        chart1.type = 'col'
+        chart1.title = f'Deflexão Média por Segmento — {nome}'
+        chart1.style = 10
+        chart1.width = 20
+        chart1.height = 12
+        chart1.y_axis.title = 'Deflexão (0,01mm)'
+        chart1.x_axis.title = 'Segmento'
+
+        cats = Reference(ws_seg, min_col=1,
+                         min_row=tbl_start + 1, max_row=tbl_end)
+        chart1.set_categories(cats)
+        data1 = Reference(ws_seg, min_col=defl_idx,
+                          min_row=tbl_start, max_row=tbl_end)
+        chart1.add_data(data1, titles_from_data=True)
+        chart1.series[0].graphicalProperties.solidFill = '2E75B6'
+
+        dl = DataLabelList()
+        dl.showVal = True
+        dl.numFmt = '0.00'
+        chart1.series[0].dLbls = dl
+        ws_seg.add_chart(chart1, f'A{tbl_end + 2}')
+
+    # Gráfico — Deflexão caract por segmento
+    if 'Deflexao_caract_med' in tbl.columns and len(tbl) > 0:
+        dc_idx = list(tbl.columns).index('Deflexao_caract_med') + 1
+        chart_dc = BarChart()
+        chart_dc.type = 'col'
+        chart_dc.title = f'Deflexão Característica Média — {nome}'
+        chart_dc.style = 10
+        chart_dc.width = 20
+        chart_dc.height = 12
+        chart_dc.y_axis.title = 'Deflexão Caract. (0,01mm)'
+
+        chart_dc.set_categories(cats)
+        data_dc = Reference(ws_seg, min_col=dc_idx,
+                            min_row=tbl_start, max_row=tbl_end)
+        chart_dc.add_data(data_dc, titles_from_data=True)
+        chart_dc.series[0].graphicalProperties.solidFill = 'C00000'
+
+        dl_dc = DataLabelList()
+        dl_dc.showVal = True
+        dl_dc.numFmt = '0.00'
+        chart_dc.series[0].dLbls = dl_dc
+        ws_seg.add_chart(chart_dc, f'L{tbl_end + 2}')
+
+    # Gráfico — Comprimento dos segmentos
+    if 'Comprimento_m' in tbl.columns and len(tbl) > 0:
+        chart2 = BarChart()
+        chart2.type = 'col'
+        chart2.title = f'Comprimento dos Segmentos — {nome}'
+        chart2.style = 10
+        chart2.width = 20
+        chart2.height = 12
+        chart2.y_axis.title = 'Comprimento (m)'
+        chart2.x_axis.title = 'Segmento'
+
+        chart2.set_categories(cats)
+        data2 = Reference(ws_seg, min_col=comp_idx_c,
+                          min_row=tbl_start, max_row=tbl_end)
+        chart2.add_data(data2, titles_from_data=True)
+        chart2.series[0].graphicalProperties.solidFill = '548235'
+
+        dl2 = DataLabelList()
+        dl2.showVal = True
+        dl2.numFmt = '#,##0'
+        chart2.series[0].dLbls = dl2
+        ws_seg.add_chart(chart2, f'A{tbl_end + 20}')
+
+    # Gráfico — Deflexão std por segmento
+    if 'Deflexao_std' in tbl.columns and len(tbl) > 0:
+        std_idx = list(tbl.columns).index('Deflexao_std') + 1
+        chart_std = BarChart()
+        chart_std.type = 'col'
+        chart_std.title = f'Desvio Padrão da Deflexão — {nome}'
+        chart_std.style = 10
+        chart_std.width = 20
+        chart_std.height = 12
+        chart_std.y_axis.title = 'Std (0,01mm)'
+
+        chart_std.set_categories(cats)
+        data_std = Reference(ws_seg, min_col=std_idx,
+                             min_row=tbl_start, max_row=tbl_end)
+        chart_std.add_data(data_std, titles_from_data=True)
+        chart_std.series[0].graphicalProperties.solidFill = 'BF8F00'
+
+        dl_std = DataLabelList()
+        dl_std.showVal = True
+        dl_std.numFmt = '0.00'
+        chart_std.series[0].dLbls = dl_std
+        ws_seg.add_chart(chart_std, f'L{tbl_end + 20}')
+
+    # ══════════════════════════════════════════════════════════════════
+    # ABA 3 — PERFIL LONGITUDINAL
+    # ══════════════════════════════════════════════════════════════════
+    ws_perf = wb.create_sheet('Perfil Longitudinal')
+    ws_perf.sheet_properties.tabColor = '548235'
+
+    row = _add_title(ws_perf, f'Perfil Longitudinal — {nome}', merge_cols=8)
+
+    if col_final in seg_final.columns:
+        perf_cols = ['km_ini', 'Deflexao']
+        if 'Deflexao_caract' in seg_final.columns:
+            perf_cols.append('Deflexao_caract')
+        if 'Deflexao_std' in seg_final.columns:
+            perf_cols.append('Deflexao_std')
+        perf_cols.append(col_final)
+
+        perf_cols = [c for c in perf_cols if c in seg_final.columns]
+        perf_df = seg_final[perf_cols].copy()
+        perf_df = perf_df.rename(columns={col_final: 'Segmento'})
+
+        perf_data_start = row
+        row = _write_df(ws_perf, perf_df.round(2), start_row=row)
+        perf_data_end = row - 1
+
+        # Gráfico de perfil — Deflexão
+        chart_p = LineChart()
+        chart_p.title = f'Perfil Longitudinal de Deflexão — {nome}'
+        chart_p.style = 10
+        chart_p.width = 26
+        chart_p.height = 14
+        chart_p.x_axis.title = 'Estação (m)'
+        chart_p.y_axis.title = 'Deflexão (0,01mm)'
+
+        cats_p = Reference(ws_perf, min_col=1,
+                           min_row=perf_data_start + 1, max_row=perf_data_end)
+        vals_p = Reference(ws_perf, min_col=2,
+                           min_row=perf_data_start, max_row=perf_data_end)
+        chart_p.add_data(vals_p, titles_from_data=True)
+        chart_p.set_categories(cats_p)
+        chart_p.series[0].graphicalProperties.line.width = 15000
+
+        # Deflexão caract no mesmo gráfico
+        if 'Deflexao_caract' in perf_df.columns:
+            dc_p_idx = list(perf_df.columns).index('Deflexao_caract') + 1
+            vals_dc = Reference(ws_perf, min_col=dc_p_idx,
+                                min_row=perf_data_start, max_row=perf_data_end)
+            chart_p.add_data(vals_dc, titles_from_data=True)
+
+        ws_perf.add_chart(chart_p,
+                          f'{get_column_letter(len(perf_df.columns) + 2)}{perf_data_start}')
+
+    # ══════════════════════════════════════════════════════════════════
+    # ABA 4 — DADOS COMPLETOS 120m
+    # ══════════════════════════════════════════════════════════════════
+    ws_dados = wb.create_sheet('Dados 120m')
+    ws_dados.sheet_properties.tabColor = '7030A0'
+
+    row = _add_title(ws_dados, f'Dados Completos (120m) — {nome}',
+                     merge_cols=10)
+
+    cols_export = ['seg_id', 'km_ini', 'km_fim', 'comprimento_m',
+                   'Deflexao', 'Deflexao_std', 'Deflexao_caract',
+                   'Deflexao_max', 'Deflexao_min', 'CV_deflexao']
+    if col_cluster in seg_final.columns:
+        cols_export.append(col_cluster)
+    if col_final in seg_final.columns:
+        cols_export.append(col_final)
+    cols_export = [c for c in cols_export if c in seg_final.columns]
+
+    data120_start = row
+    row = _write_df(ws_dados, seg_final[cols_export].round(4), start_row=row)
+    data120_end = row - 1
+
+    # Formatação condicional na deflexão
+    if 'Deflexao' in cols_export:
+        d_idx = cols_export.index('Deflexao') + 1
+        d_letter = get_column_letter(d_idx)
+        ws_dados.conditional_formatting.add(
+            f'{d_letter}{data120_start + 1}:{d_letter}{data120_end}',
+            ColorScaleRule(
+                start_type='min', start_color='C6EFCE',
+                mid_type='percentile', mid_value=50, mid_color='FFEB9C',
+                end_type='max', end_color='FFC7CE'
+            )
+        )
+
+    # Gráfico de perfil nos dados 120m
+    if 'km_ini' in cols_export and 'Deflexao' in cols_export:
+        km_idx = cols_export.index('km_ini') + 1
+        d_idx = cols_export.index('Deflexao') + 1
+
+        chart_d = LineChart()
+        chart_d.title = f'Deflexão a cada 120m — {nome}'
+        chart_d.style = 10
+        chart_d.width = 24
+        chart_d.height = 12
+        chart_d.x_axis.title = 'Estação (m)'
+        chart_d.y_axis.title = 'Deflexão (0,01mm)'
+
+        cats_d = Reference(ws_dados, min_col=km_idx,
+                           min_row=data120_start + 1, max_row=data120_end)
+        vals_d = Reference(ws_dados, min_col=d_idx,
+                           min_row=data120_start, max_row=data120_end)
+        chart_d.add_data(vals_d, titles_from_data=True)
+        chart_d.set_categories(cats_d)
+
+        ws_dados.add_chart(chart_d,
+                           f'{get_column_letter(len(cols_export) + 2)}{data120_start}')
+
+    # ══════════════════════════════════════════════════════════════════
+    # ABA 5 — ESTATÍSTICAS POR SEGMENTO
+    # ══════════════════════════════════════════════════════════════════
+    ws_stats = wb.create_sheet('Estatísticas')
+    ws_stats.sheet_properties.tabColor = 'BF8F00'
+
+    row = _add_title(ws_stats, f'Estatísticas — {nome}', merge_cols=8)
+
+    # Descritivas gerais
+    row = _add_subtitle(ws_stats, 'Estatísticas Gerais da Deflexão', row)
+    desc_cols = [c for c in ['Deflexao', 'Deflexao_std', 'Deflexao_caract',
+                             'CV_deflexao'] if c in seg120.columns]
+    if desc_cols:
+        desc = seg120[desc_cols].describe().round(4)
+        desc_reset = desc.reset_index().rename(columns={'index': 'Estatística'})
+        row = _write_df(ws_stats, desc_reset, start_row=row)
+
+    # Descritivas por segmento
+    row += 2
+    row = _add_subtitle(ws_stats, 'Estatísticas por Segmento Final', row)
+
+    if col_final in seg_final.columns:
+        stats_per_seg = seg_final.groupby(col_final).agg(
+            N_pontos_120m=('seg_id', 'count'),
+            Deflexao_media=('Deflexao', 'mean'),
+            Deflexao_std=('Deflexao', 'std'),
+            Deflexao_min=('Deflexao', 'min'),
+            Deflexao_max=('Deflexao', 'max'),
+            Deflexao_mediana=('Deflexao', 'median'),
+            CV=('Deflexao', lambda x: x.std() / x.mean() if x.mean() != 0 else 0),
+        ).reset_index().rename(columns={col_final: 'Segmento'})
+
+        stats_start = row
+        row = _write_df(ws_stats, stats_per_seg.round(4), start_row=row)
+        stats_end = row - 1
+
+        # Formatação condicional no CV (alto = ruim)
+        if 'CV' in stats_per_seg.columns:
+            cv_idx = list(stats_per_seg.columns).index('CV') + 1
+            cv_letter = get_column_letter(cv_idx)
+            ws_stats.conditional_formatting.add(
+                f'{cv_letter}{stats_start + 1}:{cv_letter}{stats_end}',
+                ColorScaleRule(
+                    start_type='min', start_color='C6EFCE',
+                    mid_type='percentile', mid_value=50, mid_color='FFEB9C',
+                    end_type='max', end_color='FFC7CE'
+                )
+            )
+
+        # Gráfico — Deflexão média + std por segmento
+        if len(stats_per_seg) > 0:
+            chart_s = BarChart()
+            chart_s.type = 'col'
+            chart_s.title = f'Deflexão por Segmento (média ± std) — {nome}'
+            chart_s.style = 10
+            chart_s.width = 22
+            chart_s.height = 12
+
+            cats_s = Reference(ws_stats, min_col=1,
+                               min_row=stats_start + 1, max_row=stats_end)
+            chart_s.set_categories(cats_s)
+
+            med_idx = list(stats_per_seg.columns).index('Deflexao_media') + 1
+            data_m = Reference(ws_stats, min_col=med_idx,
+                               min_row=stats_start, max_row=stats_end)
+            chart_s.add_data(data_m, titles_from_data=True)
+            chart_s.series[0].graphicalProperties.solidFill = '2E75B6'
+
+            std_s_idx = list(stats_per_seg.columns).index('Deflexao_std') + 1
+            data_st = Reference(ws_stats, min_col=std_s_idx,
+                                min_row=stats_start, max_row=stats_end)
+            chart_s.add_data(data_st, titles_from_data=True)
+            chart_s.series[1].graphicalProperties.solidFill = 'BF8F00'
+
+            ws_stats.add_chart(chart_s, f'A{stats_end + 2}')
+
+            # Gráfico — CV por segmento
+            chart_cv = BarChart()
+            chart_cv.type = 'col'
+            chart_cv.title = f'Coeficiente de Variação por Segmento — {nome}'
+            chart_cv.style = 10
+            chart_cv.width = 22
+            chart_cv.height = 12
+
+            chart_cv.set_categories(cats_s)
+            data_cv = Reference(ws_stats, min_col=cv_idx,
+                                min_row=stats_start, max_row=stats_end)
+            chart_cv.add_data(data_cv, titles_from_data=True)
+            chart_cv.series[0].graphicalProperties.solidFill = 'C00000'
+
+            dl_cv = DataLabelList()
+            dl_cv.showVal = True
+            dl_cv.numFmt = '0.00'
+            chart_cv.series[0].dLbls = dl_cv
+
+            ws_stats.add_chart(chart_cv, f'L{stats_end + 2}')
+
+    # ══════════════════════════════════════════════════════════════════
+    # ABA 6 — POSIÇÃO NESTE MÉTODO VS OUTROS (se df_comp disponível)
+    # ══════════════════════════════════════════════════════════════════
+    if df_comp is not None and not df_comp.empty:
+        ws_rank = wb.create_sheet('Ranking')
+        ws_rank.sheet_properties.tabColor = 'C00000'
+
+        row = _add_title(ws_rank, f'Posição de {nome} entre todos os métodos',
+                         merge_cols=len(df_comp.columns))
+
+        row = _add_subtitle(ws_rank, 'Tabela Comparativa (todos os métodos)', row)
+        comp_start = row
+        row = _write_df(ws_rank, df_comp.round(4), start_row=row)
+        comp_end = row - 1
+
+        # Highlight a linha deste método
+        metodo_col_name = df_comp.columns[0]  # geralmente 'Método'
+        for r in range(comp_start + 1, comp_end + 1):
+            cell_val = ws_rank.cell(row=r, column=1).value
+            if cell_val == nome:
+                for c in range(1, len(df_comp.columns) + 1):
+                    ws_rank.cell(row=r, column=c).fill = PatternFill(
+                        start_color='FFFF00', end_color='FFFF00',
+                        fill_type='solid')
+                    ws_rank.cell(row=r, column=c).font = Font(
+                        bold=True, name='Calibri', size=10)
+
+        # Gráfico comparativo
+        if 'silhouette' in df_comp.columns:
+            sil_col = list(df_comp.columns).index('silhouette') + 1
+            chart_r = BarChart()
+            chart_r.type = 'col'
+            chart_r.title = 'Silhouette Score — Todos os Métodos'
+            chart_r.style = 10
+            chart_r.width = 20
+            chart_r.height = 12
+
+            cats_r = Reference(ws_rank, min_col=1,
+                               min_row=comp_start + 1, max_row=comp_end)
+            chart_r.set_categories(cats_r)
+            data_r = Reference(ws_rank, min_col=sil_col,
+                               min_row=comp_start, max_row=comp_end)
+            chart_r.add_data(data_r, titles_from_data=True)
+            chart_r.series[0].graphicalProperties.solidFill = '2E75B6'
+
+            dl_r = DataLabelList()
+            dl_r.showVal = True
+            dl_r.numFmt = '0.000'
+            chart_r.series[0].dLbls = dl_r
+            ws_rank.add_chart(chart_r, f'A{comp_end + 2}')
+
+        if 'davies_bouldin' in df_comp.columns:
+            db_col = list(df_comp.columns).index('davies_bouldin') + 1
+            chart_db = BarChart()
+            chart_db.type = 'col'
+            chart_db.title = 'Davies-Bouldin — Todos os Métodos (menor=melhor)'
+            chart_db.style = 10
+            chart_db.width = 20
+            chart_db.height = 12
+
+            chart_db.set_categories(cats_r)
+            data_db = Reference(ws_rank, min_col=db_col,
+                                min_row=comp_start, max_row=comp_end)
+            chart_db.add_data(data_db, titles_from_data=True)
+            chart_db.series[0].graphicalProperties.solidFill = 'BF8F00'
+            ws_rank.add_chart(chart_db, f'L{comp_end + 2}')
+
+    # ══════════════════════════════════════════════════════════════════
+    # SALVAR
+    # ══════════════════════════════════════════════════════════════════
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
